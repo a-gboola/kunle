@@ -113,8 +113,10 @@ class ExpressionEvaluator:
                 return self._check_number(self.BINARY_OPERATORS[type(node.op)](left, right))
             except ZeroDivisionError as error:
                 raise CalculatorError("Cannot divide by 0") from error
-            except (OverflowError, ValueError) as error:
+            except OverflowError as error:
                 raise CalculatorError("Number too large") from error
+            except ValueError as error:
+                raise CalculatorError("Invalid value") from error
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             if node.func.id not in self.functions or node.keywords or len(node.args) != 1:
                 raise CalculatorError("Invalid function")
@@ -177,7 +179,7 @@ class CalculatorApp:
             self.display.delete(len(self.display.get()) - 1, tk.END)
         elif value == "=":
             self.calculate()
-        elif len(self.display.get()) < MAX_INPUT_LENGTH:
+        elif len(self.display.get()) + len(value) <= MAX_INPUT_LENGTH:
             self.display.insert(tk.END, value)
 
     def calculate(self):

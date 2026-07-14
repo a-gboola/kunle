@@ -1,5 +1,10 @@
 # Secure Calculator Threat Model
 
+**Implementation:** `scicalc.py`
+
+**Security goal:** calculate only the supported mathematical language while
+protecting the host, calculator availability, and result integrity.
+
 ## Scope and assets
 
 The application accepts calculator expressions through a Tkinter entry field and returns a numeric result. Protected assets are: the user's machine and files, application availability, and the integrity of calculation results. The calculator runs locally and has no network, authentication, or persistent-data boundary.
@@ -22,3 +27,14 @@ Text entered or pasted into the display is untrusted. An attacker is anyone able
 ## Residual risk and maintenance
 
 The calculator intentionally supports only its documented expression language; unsupported Python syntax must remain rejected. New operators or functions must be explicitly added to `ExpressionEvaluator`, receive limits where their work can grow, and receive negative/security tests. The local GUI process remains subject to operating-system-level compromise outside this application's scope.
+
+## Verification evidence
+
+`test_scicalc.py` verifies expected calculations and the security boundaries:
+code-execution syntax, division by zero, invalid mathematical domains,
+factorial constraints, non-finite values, oversized powers, and overlong input.
+Run it with:
+
+```powershell
+python -m unittest -v test_scicalc.py
+```

@@ -27,9 +27,11 @@ class ExpressionEvaluatorTests(unittest.TestCase):
     def test_handles_edge_cases_and_overflow(self):
         self.assert_calculator_error("1 / 0", "Cannot divide by 0")
         self.assert_calculator_error("sqrt(-1)", "Invalid value")
+        self.assert_calculator_error("(-4)^0.5", "Invalid value")
         self.assert_calculator_error("fact(3.5)", "whole numbers")
         self.assert_calculator_error("2^2000", "Number too large")
         self.assert_calculator_error("2^10001", "Exponent too large")
+        self.assert_calculator_error("1e309", "Number too large")
         self.assert_calculator_error("1" * (MAX_INPUT_LENGTH + 1), "too long")
 
 
