@@ -1,42 +1,45 @@
-import tkinter as tk
+"""A small scientific calculator with a bounded, non-eval expression engine."""
+
+import ast
 import math
+import operator
 import re
-
-# ---- Security constants ----
-MAX_INPUT_LENGTH = 50          # Prevents absurdly long expressions (basic DoS protection)
-MAX_FACTORIAL_INPUT = 170      # math.factorial(171) already overflows a float; this keeps it fast and safe
-ALLOWED_CHARS_PATTERN = re.compile(r'^[0-9a-z\.\+\-\*/\(\)\^\s]*$')  # Whitelist: only characters our buttons can produce
+import tkinter as tk
 
 
-class CalculatorApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Scientific Calculator")
-        self.root.geometry("420x600")
-        self.root.configure(bg="#202020")
+# Limits are deliberately conservative: calculator input should always be quick to parse
+# and calculate, even when text is pasted directly into the display widget.
+MAX_INPUT_LENGTH = 50
+MAX_AST_NODES = 100
+MAX_AST_DEPTH = 25
+MAX_FACTORIAL_INPUT = 170
+MAX_POWER_EXPONENT = 10_000
+MAX_INTEGER_BITS = 1024  # Slightly above 170!, while preventing enormous integers.
+ALLOWED_CHARS_PATTERN = re.compile(r"^[0-9a-z\.\+\-\*/\(\)\^\s]*$")
 
-        self.display = tk.Entry(root, font=("Helvetica", 28), bg="#d4d4d2", bd=0, justify="right")
-        self.display.grid(row=0, column=0, columnspan=4, ipadx=8, ipady=25, pady=10, padx=10, sticky="nsew")
 
-        self.create_buttons()
+class CalculatorError(Exception):
+    """An expected error that is safe to show to a calculator user."""
 
-    def safe_factorial(self, n):
-        """
-        Wraps math.factorial with limits so a huge or invalid number
-        can't freeze the app or throw an ugly, unhandled crash.
-        """
-        if n < 0:
-            raise ValueError("Factorial of a negative number is undefined")
-        if n != int(n):
-            raise ValueError("Factorial only works on whole numbers")
-        if n > MAX_FACTORIAL_INPUT:
-            raise OverflowError("Number too large for factorial")
-        return math.factorial(int(n))
 
-    def create_buttons(self):
-        # Safe dictionary of math functions available to eval().
-        # __builtins__ is disabled below, so this dict is the ONLY thing eval() can call.
-        self.safe_env = {
+class ExpressionEvaluator:
+    """Evaluate only the small mathematical language exposed by the UI.
+
+    No Python source is executed.  The AST is checked node by node and only the
+    operators, constants, and functions listed below can be used.
+    """
+
+    BINARY_OPERATORS = {
+        ast.Add: operator.add,
+        ast.Sub: operator.sub,
+        ast.Mult: operator.mul,
+        ast.Div: operator.truediv,
+        ast.Pow: operator.pow,
+    }
+    UNARY_OPERATORS = {ast.UAdd: operator.pos, ast.USub: operator.neg}
+
+    def __init__(self):
+        self.functions = {
             "sin": lambda x: math.sin(math.radians(x)),
             "cos": lambda x: math.cos(math.radians(x)),
             "tan": lambda x: math.tan(math.radians(x)),
@@ -47,114 +50,165 @@ class CalculatorApp:
             "ln": math.log,
             "sqrt": math.sqrt,
             "fact": self.safe_factorial,
-            "pi": math.pi,
-            "e": math.e
         }
+        self.constants = {"pi": math.pi, "e": math.e}
 
+    @staticmethod
+    def safe_factorial(value):
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise CalculatorError("Factorial requires a number")
+        if not math.isfinite(value):
+            raise CalculatorError("Number too large")
+        if value < 0:
+            raise CalculatorError("Factorial of a negative number is undefined")
+        if isinstance(value, float) and not value.is_integer():
+            raise CalculatorError("Factorial only works on whole numbers")
+        if value > MAX_FACTORIAL_INPUT:
+            raise CalculatorError("Number too large for factorial")
+        return math.factorial(int(value))
+
+    @staticmethod
+    def _check_number(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise CalculatorError("Invalid value")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise CalculatorError("Number too large")
+        if isinstance(value, int) and value.bit_length() > MAX_INTEGER_BITS:
+            raise CalculatorError("Number too large")
+        return value
+
+    def evaluate(self, expression):
+        if not expression or not expression.strip():
+            raise CalculatorError("Invalid expression")
+        if len(expression) > MAX_INPUT_LENGTH:
+            raise CalculatorError("Too long")
+        if not ALLOWED_CHARS_PATTERN.fullmatch(expression):
+            raise CalculatorError("Invalid input")
+
+        try:
+            tree = ast.parse(expression.replace("^", "**"), mode="eval")
+        except (SyntaxError, ValueError, MemoryError) as error:
+            raise CalculatorError("Invalid expression") from error
+
+        nodes = list(ast.walk(tree))
+        if len(nodes) > MAX_AST_NODES or self._depth(tree) > MAX_AST_DEPTH:
+            raise CalculatorError("Expression too complex")
+        return self._check_number(self._evaluate_node(tree.body))
+
+    def _depth(self, node):
+        children = list(ast.iter_child_nodes(node))
+        return 1 + max((self._depth(child) for child in children), default=0)
+
+    def _evaluate_node(self, node):
+        if isinstance(node, ast.Constant):
+            # Python's parser also accepts strings, booleans, and complex values.
+            if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
+                raise CalculatorError("Invalid value")
+            return self._check_number(node.value)
+
+        if isinstance(node, ast.Name):
+            if node.id not in self.constants:
+                raise CalculatorError("Invalid input")
+            return self.constants[node.id]
+
+        if isinstance(node, ast.UnaryOp) and type(node.op) in self.UNARY_OPERATORS:
+            return self._check_number(self.UNARY_OPERATORS[type(node.op)](self._evaluate_node(node.operand)))
+
+        if isinstance(node, ast.BinOp) and type(node.op) in self.BINARY_OPERATORS:
+            left = self._evaluate_node(node.left)
+            right = self._evaluate_node(node.right)
+            if isinstance(node.op, ast.Pow):
+                self._check_power(left, right)
+            try:
+                return self._check_number(self.BINARY_OPERATORS[type(node.op)](left, right))
+            except ZeroDivisionError as error:
+                raise CalculatorError("Cannot divide by 0") from error
+            except (OverflowError, ValueError) as error:
+                raise CalculatorError("Number too large") from error
+
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id not in self.functions or node.keywords or len(node.args) != 1:
+                raise CalculatorError("Invalid function")
+            try:
+                return self._check_number(self.functions[node.func.id](self._evaluate_node(node.args[0])))
+            except CalculatorError:
+                raise
+            except (ValueError, OverflowError) as error:
+                raise CalculatorError("Invalid value") from error
+
+        raise CalculatorError("Invalid expression")
+
+    @staticmethod
+    def _check_power(base, exponent):
+        if abs(exponent) > MAX_POWER_EXPONENT:
+            raise CalculatorError("Exponent too large")
+        if base == 0 and exponent < 0:
+            raise CalculatorError("Cannot divide by 0")
+        if isinstance(base, int) and isinstance(exponent, int) and exponent >= 0:
+            if base not in (-1, 0, 1) and base.bit_length() * exponent > MAX_INTEGER_BITS:
+                raise CalculatorError("Number too large")
+
+
+class CalculatorApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Scientific Calculator")
+        self.root.geometry("420x600")
+        self.root.configure(bg="#202020")
+        self.evaluator = ExpressionEvaluator()
+
+        self.display = tk.Entry(root, font=("Helvetica", 28), bg="#d4d4d2", bd=0, justify="right")
+        self.display.grid(row=0, column=0, columnspan=4, ipadx=8, ipady=25, pady=10, padx=10, sticky="nsew")
+        self.create_buttons()
+
+    def create_buttons(self):
         buttons = [
-            ('C', 'DEL', '(', ')'),
-            ('sin(', 'cos(', 'tan(', '/'),
-            ('asin(', 'acos(', 'atan(', '*'),
-            ('7', '8', '9', '-'),
-            ('4', '5', '6', '+'),
-            ('1', '2', '3', '^'),
-            ('log(', 'ln(', 'sqrt(', 'fact('),
-            ('0', '.', 'pi', '=')
+            ("C", "DEL", "(", ")"), ("sin(", "cos(", "tan(", "/"),
+            ("asin(", "acos(", "atan(", "*"), ("7", "8", "9", "-"),
+            ("4", "5", "6", "+"), ("1", "2", "3", "^"),
+            ("log(", "ln(", "sqrt(", "fact("), ("0", ".", "pi", "="),
         ]
-
-        for r, row in enumerate(buttons, start=1):
-            for c, text in enumerate(row):
-                if text in ['=', 'C', 'DEL']:
-                    bg_color = "#ff9500"
-                    fg_color = "white"
-                elif text in ['/', '*', '-', '+', '^']:
-                    bg_color = "#ff9500"
-                    fg_color = "white"
-                elif text.isalpha() or '(' in text or ')' in text:
-                    bg_color = "#505050"
-                    fg_color = "white"
-                else:
-                    bg_color = "#d4d4d2"
-                    fg_color = "black"
-
-                btn = tk.Button(self.root, text=text, font=("Helvetica", 16, "bold"),
-                                bg=bg_color, fg=fg_color, activebackground="#7a7a7a",
-                                borderwidth=0, cursor="hand2",
-                                command=lambda t=text: self.on_button_click(t))
-                btn.grid(row=r, column=c, sticky="nsew", padx=2, pady=2)
-                self.root.grid_columnconfigure(c, weight=1)
-            self.root.grid_rowconfigure(r, weight=1)
+        for row_number, row in enumerate(buttons, start=1):
+            for column, text in enumerate(row):
+                is_action_or_operator = text in {"=", "C", "DEL", "/", "*", "-", "+", "^"}
+                is_function = text.isalpha() or "(" in text or text == ")"
+                bg_color = "#ff9500" if is_action_or_operator else "#505050" if is_function else "#d4d4d2"
+                fg_color = "white" if is_action_or_operator or is_function else "black"
+                tk.Button(self.root, text=text, font=("Helvetica", 16, "bold"), bg=bg_color,
+                          fg=fg_color, activebackground="#7a7a7a", borderwidth=0, cursor="hand2",
+                          command=lambda value=text: self.on_button_click(value)).grid(
+                              row=row_number, column=column, sticky="nsew", padx=2, pady=2)
+                self.root.grid_columnconfigure(column, weight=1)
+            self.root.grid_rowconfigure(row_number, weight=1)
 
     def show_error(self, message="Error"):
-        """Clears the display and shows a short, safe error message (no internal details leaked)."""
         self.display.delete(0, tk.END)
         self.display.insert(tk.END, message)
 
     def on_button_click(self, char):
-        if char == 'C':
+        if char == "C":
             self.display.delete(0, tk.END)
-
-        elif char == 'DEL':
+        elif char == "DEL":
             current = self.display.get()
             self.display.delete(0, tk.END)
             self.display.insert(tk.END, current[:-1])
-
-        elif char == '=':
-            expression = self.display.get()
-
-            # --- Security check 1: reject empty input ---
-            if not expression:
-                return
-
-            # --- Security check 2: reject overly long input (DoS protection) ---
-            if len(expression) > MAX_INPUT_LENGTH:
-                self.show_error("Too long")
-                return
-
-            # --- Security check 3: whitelist check BEFORE eval() ever runs ---
-            # Even though eval() below is restricted, this is a second layer of
-            # defense: if a character isn't one our buttons can produce, refuse it.
-            if not ALLOWED_CHARS_PATTERN.match(expression):
-                self.show_error("Invalid input")
-                return
-
-            expression = expression.replace('^', '**')
-
+        elif char == "=":
             try:
-                result = eval(expression, {"__builtins__": None}, self.safe_env)
-
-                if isinstance(result, complex):
-                    # e.g. sqrt of a negative number
-                    raise ValueError("Result is not a real number")
-
-                if isinstance(result, float) and result.is_integer():
-                    result = int(result)
-                elif isinstance(result, float):
-                    result = round(result, 6)
-
+                result = self.evaluator.evaluate(self.display.get())
+                if isinstance(result, float):
+                    result = int(result) if result.is_integer() else round(result, 6)
                 self.display.delete(0, tk.END)
                 self.display.insert(tk.END, str(result))
-
-            except ZeroDivisionError:
-                self.show_error("Cannot divide by 0")
-            except ValueError as e:
-                self.show_error(str(e) if str(e) else "Invalid value")
-            except OverflowError:
-                self.show_error("Number too large")
-            except SyntaxError:
-                self.show_error("Invalid expression")
+            except CalculatorError as error:
+                self.show_error(str(error))
             except Exception:
-                # Catch-all for anything unexpected; never show raw Python error details to the user
+                # A final boundary: GUI users never receive Python internals.
                 self.show_error("Error")
-
-        else:
-            # --- Security check 4: don't let input grow past the limit while typing ---
-            if len(self.display.get()) >= MAX_INPUT_LENGTH:
-                return
+        elif len(self.display.get()) < MAX_INPUT_LENGTH:
             self.display.insert(tk.END, char)
 
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = CalculatorApp(root)
+    CalculatorApp(root)
     root.mainloop()
