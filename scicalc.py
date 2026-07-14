@@ -164,11 +164,11 @@ class CalculatorApp:
                 function = text.isalpha() or "(" in text or text == ")"
                 bg = "#ff9500" if action else "#505050" if function else "#d4d4d2"
                 fg = "white" if action or function else "black"
-                tk.Button(root, text=text, font=("Helvetica", 16, "bold"), bg=bg, fg=fg,
+                tk.Button(self.root, text=text, font=("Helvetica", 16, "bold"), bg=bg, fg=fg,
                           borderwidth=0, command=lambda value=text: self.on_button_click(value)).grid(
                               row=row_number, column=column, padx=2, pady=2, sticky="nsew")
-                root.grid_columnconfigure(column, weight=1)
-            root.grid_rowconfigure(row_number, weight=1)
+                self.root.grid_columnconfigure(column, weight=1)
+            self.root.grid_rowconfigure(row_number, weight=1)
 
     def on_button_click(self, value):
         if value == "C":
